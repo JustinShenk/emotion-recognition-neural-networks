@@ -1,103 +1,92 @@
-from __future__ import division, absolute_import
-import re
-import numpy as np
-from dataset_loader import DatasetLoader
-import tflearn
-from tflearn.layers.core import input_data, dropout, fully_connected, flatten
-from tflearn.layers.conv import conv_2d, max_pool_2d, avg_pool_2d
-from tflearn.layers.merge_ops import merge
-from tflearn.layers.normalization import local_response_normalization
-from tflearn.layers.estimator import regression
-from constants import *
-from os.path import isfile, join
-import random
+#!/usr/bin/python3
+import mvnc.mvncapi as mvnc
+import skimage
+from skimage import io, transform
+import numpy
+import os
 import sys
 
+# User modifiable input parameters
+NCAPPZOO_PATH = './'
+GRAPH_PATH = NCAPPZOO_PATH + 'gpu_model/graph'
+IMAGE_PATH = NCAPPZOO_PATH + 'data/images/face.jpg'
+LABELS_FILE_PATH = NCAPPZOO_PATH + 'data/fer2013/emotions.txt'
+IMAGE_MEAN = 0.55
+IMAGE_STDDEV = 0.248
+IMAGE_DIM = (48, 48)
+
+
 class EmotionRecognition:
+    def __init__(self):
+        # Look for enumerated NCS device(s); quit program if none found.
+        devices = mvnc.EnumerateDevices()
+        if len(devices) == 0:
+            print('No devices found')
+            quit()
 
-  def __init__(self):
-    self.dataset = DatasetLoader()
+        # Get a handle to the first enumerated device and open it
+        self.device = mvnc.Device(devices[0])
+        self.device.OpenDevice()
 
-  def build_network(self):
-    # Smaller 'AlexNet'
-    # https://github.com/tflearn/tflearn/blob/master/examples/images/alexnet.py
-    print('[+] Building CNN')
-    self.network = input_data(shape = [None, SIZE_FACE, SIZE_FACE, 1])
-    self.network = conv_2d(self.network, 64, 5, activation = 'relu')
-    #self.network = local_response_normalization(self.network)
-    self.network = max_pool_2d(self.network, 3, strides = 2)
-    self.network = conv_2d(self.network, 64, 5, activation = 'relu')
-    self.network = max_pool_2d(self.network, 3, strides = 2)
-    self.network = conv_2d(self.network, 128, 4, activation = 'relu')
-    self.network = dropout(self.network, 0.3)
-    self.network = fully_connected(self.network, 3072, activation = 'relu')
-    self.network = fully_connected(self.network, len(EMOTIONS), activation = 'softmax')
-    self.network = regression(self.network,
-      optimizer = 'momentum',
-      loss = 'categorical_crossentropy')
-    self.model = tflearn.DNN(
-      self.network,
-      checkpoint_path = SAVE_DIRECTORY + '/emotion_recognition',
-      max_checkpoints = 1,
-      tensorboard_verbose = 2
-    )
-    self.load_model()
+        # Load a graph file onto the NCS device
 
-  def load_saved_dataset(self):
-    self.dataset.load_from_save()
-    print('[+] Dataset found and loaded')
+        # Read the graph file into a buffer
+        with open(GRAPH_PATH, mode='rb') as f:
+            blob = f.read()
 
-  def start_training(self):
-    self.load_saved_dataset()
-    self.build_network()
-    if self.dataset is None:
-      self.load_saved_dataset()
-    # Training
-    print('[+] Training network')
-    self.model.fit(
-      self.dataset.images, self.dataset.labels,
-      validation_set = (self.dataset.images_test, self.dataset._labels_test),
-      n_epoch = 100,
-      batch_size = 50,
-      shuffle = True,
-      show_metric = True,
-      snapshot_step = 200,
-      snapshot_epoch = True,
-      run_id = 'emotion_recognition'
-    )
+        # Load the graph buffer into the NCS
+        self.graph = self.device.AllocateGraph(blob)
 
-  def predict(self, image):
-    if image is None:
-      return None
-    image = image.reshape([-1, SIZE_FACE, SIZE_FACE, 1])
-    return self.model.predict(image)
+    def __exit__(self, exc_type, exc_value, traceback):
+        """Unload the graph and close the device. """
+        self.graph.DeallocateGraph()
+        self.device.CloseDevice()
 
-  def save_model(self):
-    self.model.save(join(SAVE_DIRECTORY, SAVE_MODEL_FILENAME))
-    print('[+] Model trained and saved at ' + SAVE_MODEL_FILENAME)
+    def predict(self, face=None, image_path=None, normalize=False):
+        """ Turn image or image_path into a prediction.
+        Args:
+            face        48x48 grayscale face image scaled from 0 to 1
+            image_path  Path to image
+        Returns:
+            result  score, eg., [[0.11 0.0415 ...]]
 
-  def load_model(self):
-    if isfile(join(SAVE_DIRECTORY, SAVE_MODEL_FILENAME)):
-      self.model.load(join(SAVE_DIRECTORY, SAVE_MODEL_FILENAME))
-      print('[+] Model loaded from ' + SAVE_MODEL_FILENAME)
+        """
+        # Read & resize image [Image size is defined during training]
+        if image_path is not None:
+            print("Loading image from {}".format(image_path))
+            img = skimage.io.imread(image_path, as_grey=True)
+            img = skimage.transform.resize(
+                img, IMAGE_DIM, preserve_range=True)
+        else:
+            img = face
+        if img is None:
+            print("No image found")
+            return None
+        if normalize:
+            img = (img - IMAGE_MEAN) * IMAGE_STDDEV
 
+        # Load the image as a half-precision floating point array
+        self.graph.LoadTensor(img.astype(numpy.float16), 'user object')
 
-def show_usage():
-  # I din't want to have more dependecies
-  print('[!] Usage: python emotion_recognition.py')
-  print('\t emotion_recognition.py train \t Trains and saves model with saved dataset')
-  print('\t emotion_recognition.py poc \t Launch the proof of concept')
+        # Get the results from NCS
+        output, userobj = self.graph.GetResult()
 
-if __name__ == "__main__":
-  if len(sys.argv) <= 1:
-    show_usage()
-    exit()
+        # Print the results
+        print('\n------- predictions --------')
 
-  network = EmotionRecognition()
-  if sys.argv[1] == 'train':
-    network.start_training()
-    network.save_model()
-  elif sys.argv[1] == 'poc':
-    import poc
-  else:
-    show_usage()
+        labels = numpy.loadtxt(LABELS_FILE_PATH, str, delimiter='\t')
+
+        order = output.argsort()[::-1][:6]
+
+        for i in range(0, 4):
+            print('prediction ' + str(i) + ' is ' + labels[order[i]])
+
+        # If a display is available, show the image on which inference was performed
+        if 'DISPLAY' in os.environ:
+            if image_path is not None:
+                skimage.io.imshow(IMAGE_PATH)
+                skimage.io.show()
+            else:
+                skimage.io.imshow(face)
+
+        return [output]
