@@ -7,6 +7,7 @@ import numpy as np
 
 cascade_classifier = cv2.CascadeClassifier(CASC_PATH)
 
+curr_face = None
 
 def brighten(data, b):
     datab = data * b
@@ -14,6 +15,7 @@ def brighten(data, b):
 
 
 def format_image(image):
+    global curr_face
     if len(image.shape) > 2 and image.shape[2] == 3:
         image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     else:
@@ -33,6 +35,7 @@ def format_image(image):
     # Chop image to face
     face = max_area_face
     image = image[face[1]:(face[1] + face[2]), face[0]:(face[0] + face[3])]
+    curr_face = face
     # Resize image to network size
     try:
         image = cv2.resize(image, (SIZE_FACE, SIZE_FACE),
@@ -87,7 +90,11 @@ while True:
             frame[200:320, 10:130, c] = face_image[:, :, c] * \
                 (face_image[:, :, 3] / 255.0) + frame[200:320,
                                                       10:130, c] * (1.0 - face_image[:, :, 3] / 255.0)
-
+    try:
+        x,y,w,h = curr_face
+        cv2.rectangle(frame, (x,y), (x+w,y+h), (255,0,0),2)
+    except:
+        pass
     # Display the resulting frame
     cv2.imshow('Video', frame)
 
